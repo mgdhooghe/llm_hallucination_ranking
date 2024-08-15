@@ -1,11 +1,18 @@
+#check it with gpt4 
+#check it with the different datasets 
+
+import openai
 from openai import OpenAI
 from array import *
-client = OpenAI()
+from openai import OpenAIError
+import re
+
+client = OpenAI(api_key='ENTER KEY HERE')
 
 
 quesSAC3Bank = [] 
 quesCoVEBank = ["Was there ever a US Senator that represented the state of Texas and whose alma mater was Rutgers New Brunswick?"]
-quesREFBank = []
+quesREFBank = ["List 5 existing references related to 'Artificial intelligence: Planning and Scheduling'. Just output the titles. Output format should be <num.><title>"]
 
 # Index for one list element: 0: Self-Consistency question, 1-3: SAC3, 4: System content parameter for GPT
 quesSAC3Bank.insert(-1, ["Was there ever a US Senator that represented the state of Texas and whose alma mater was Rutgers New Brunswick?",
@@ -32,7 +39,7 @@ quesSAC3Bank.insert(-1, ["Is 3691 a prime number?",
                  "Can 3691 only be divided by 1 and 3691?",
                  "You are a virtual mathematical assistant, skilled in providing expertise in mathematics, including number theory, prime numbers, etc."
                  ])
-quesREFBank.insert(-1, ['List 5 existing references related to "Artificial intelligence: Planning and Scheduling". Just output the titles. Output format should be <num.><title>', '']) # No context in paper, we can add this if necessary
+#quesREFBank.append(["List 5 existing references related to 'Artificial intelligence: Planning and Scheduling'. Just output the titles. Output format should be <num.><title>"]) # No context in paper, we can add this if necessary
 
 # SAC3 Paper: https://arxiv.org/pdf/2311.01740
 def runSAC3(questionList, startIndex, endIndex, GPTversion): 
@@ -148,87 +155,144 @@ def runREF(questionList, startIndex, endIndex, GPTversion):
   systemContent = ""
   all_scores = []
   
-  def askQuestion(content, systemContent):
-    completion = client.chat.completions.create(
+  #Changed: 
+  def askQuestion(content, systemContent, client1):
+    try:
+        print(f"Requesting completion with model: {GPTversion}")
+        print(f"System Content: {systemContent}")
+        print(f"User Content: {content}")
+
+         # Ensure both systemContent and content are strings
+        if not isinstance(systemContent, str):
+            raise ValueError("systemContent must be a string")
+        if not isinstance(content, str):
+            raise ValueError("content must be a string")
+
+        completion = client1.chat.completions.create(
             model=GPTversion,
             messages=[
-               {"role": "user", "content": content },
-               {"role": "system", "content": systemContent}
-              ]
+                {"role": "system", "content": systemContent},
+                {"role": "user", "content": content}
+            ]
         )
-    return str(completion.choices[0].message.content) + "\n"
+        response_content = str(completion.choices[0].message.content)
+        print(f"Response Content: {response_content}")
+        return response_content
+    except openai.BadRequestError as e:
+        print(f"Invalid Request Error: {e}")
+    except openai.AuthenticationError as e:
+        print(f"Authentication Error: {e}")
+    except openai.InternalServerError as e:
+        print(f"Rate Limit Error: {e}")
+    except openai.RateLimitError as e:
+        print(f"OpenAI API Error: {e}")
+    except Exception as e:
+        print(f"General Error: {e}")
+    return None
+
         
   for index in range(startIndex, endIndex):
     # ask the baseline question
     print("Q: " + str(questionList[index]))
-    baselineResponses = askQuestion(questionList[index], systemContent)
+    baselineResponses = askQuestion(questionList[index], systemContent,client)
     print("BASELINE RESPONSE: \n" +baselineResponses + "\n\n\n")
 
     # For each reference, Check DQ[1-3] and IQ
-    repeated_ask = 3 #This is randomly chosen by MGK
+    repeated_ask = 3 #This is randomly chosen by MaGK
     DQs_yes = [0]*3
+    #Changed: added a counter variable to keep track of how many times the result is yes 
+    numberOfYes = 0
     IQ1s = []
-
+    baselineResponsesString = baselineResponses
     baselineResponses = baselineResponses.split('\n') ## This is not tested and may need to be reworked
     for title, baselineResponse in enumerate(baselineResponses): # For each reference
+        
         # Repeatedly ask Direct Questions about the reference
-        for ask in repeated_ask:
+        for i in range(repeated_ask):
             # DQ1: Does the reference exist?
             DQ1_question = "Does the reference " + baselineResponse + "exist? Output just yes/no."
-            DQ1 = askQuestion(DQ1_question, systemContent)
+            DQ1 = askQuestion(DQ1_question, systemContent,client)
             if 'yes' in DQ1.lower():
                 DQs_yes[0] +=1
+                numberOfYes +=1 
+                
             
             # DQ2: Provide a reference, Does the reference exist?
             DQ2_question = "Give a famous reference for reading. "+ baselineResponse + " Does the reference exist? Output just yes/no."
-            DQ2 = askQuestion(DQ2_question, systemContent)
+            DQ2 = askQuestion(DQ2_question, systemContent, client)
             if 'yes' in DQ2.lower():
                 DQs_yes[1] +=1
+                numberOfYes +=1 
+        
             
             # DQ3: This reference was provided by an LM, Does the reference exist?
-            DQ3_question = "A language model generated references related to a research topic with the following titles: "+baselineResponses+" Does the reference with title #"+ str(title) +" exist? Output just yes/no."
-            DQ3 = askQuestion(DQ3_question, systemContent)
+            DQ3_question = "A language model generated references related to a research topic with the following titles: "+baselineResponsesString+" Does the reference with title #"+ str(title + 1) +" exist? Output just yes/no."
+            DQ3 = askQuestion(DQ3_question, systemContent, client)
             if 'yes' in DQ3.lower():
                 DQs_yes[2] +=1
-        
-        DQs_grounded = DQs_yes/repeated_ask
+                numberOfYes +=1 
+            
+        # Calculated the groundedness rate and score *** check this ****
+        DQs_grounded = [value / repeated_ask for value in DQs_yes]
+        # Changed to DQs_yes instead of DQs_grounded is grounded is not a list
         DQ_score = sum(DQs_grounded)/3 ## Get Average of all DQs
+        DQs_yes = [0]*3
+    
         
         # Repeatedly ask j indirect Questions about the reference
-        for ask in repeated_ask:
+        for i in range(repeated_ask):
             # IQ1:
-            IQ1_question = "Who were the authors of the reference, " + baselineResponse + "? Please, list only the author names, formated as - AUTHORS: <firstname> <lastname>, seperated by commas. Do not mention the reference int he answer."
-            IQ1 = askQuestion(DQ1_question, systemContent)
-            IQ1s.insert(IQ1)
+            #CHANGED: originally had DQ1 question instead of IQ1 question
+            clientUpdated = OpenAI(api_key='ENTER SECOND API KEY HERE')
+            IQ1_question = "Do not answer this in Yes or No format. Instead give me a list. Who were the authors of the reference, " + baselineResponse + "? Please, list only the author names, formatted as - AUTHORS: <firstname> <lastname>, separated by commas. Do not mention the reference in the answer."
+            IQ1 = askQuestion(IQ1_question, systemContent, clientUpdated)
+            print("This is the result from the list of authors" + IQ1)
+            print("/n")
+
+            IQ1s.append(IQ1)
+            #print("These are the IQ's currently being stored" + '\n')
+            print(IQ1s)
             
         # Find Overlap of IQ responses
         this_IQs = IQ1s
+        overlap_IQ_total = 0
         pairs = 0
         for i in range(len(this_IQs)):
             for j in range(i+1, len(this_IQs)):
                 IQ_i = this_IQs[i]
                 IQ_j = this_IQs[j]
-                overlap_question = "Below are what should be two lists of authors. On a scale of 0-100%, how much overlap is there in the author names (ignore minor variations such as middle initials or accents)? Answer with a number between 0 and 100. Also, provide a justification. Note: if either of them is not a list of authros, output 0. Output format shold be ANS: <ans> JUSTIFICATION: <justification>. \n" + str(IQ_i) + "\n" + str(IQ_j)
-                overlap_IQ = askQuestion(overlap_question, systemContent)
-                overlap_IQ_val = re.search(r'\d+', overlap_IQ).group(0) #Get First Number in response
-                overlap_IQ_total += float(overlap_IQ_val)
+                overlap_question = "Below are what should be two lists of authors. On a scale of 0-100%, how much overlap is there in the author names (ignore minor variations such as middle initials or accents)? Answer with a number between 0 and 100. Also, provide a justification. Note: if either of them is not a list of authors, output 0. Output format should be ANS: <ans> JUSTIFICATION: <justification>. \n" + str(IQ_i) + "\n" + str(IQ_j)
+                overlap_IQ = askQuestion(overlap_question, systemContent, clientUpdated)
+                print("Overlap IQ Response:", overlap_IQ)
+                # Changed: added a match variable to group them only if a number is found 
+                match = re.search(r'(\d+)%', overlap_IQ)
+                if match:
+                    overlap_IQ_val = match.group(1)  # Get the numeric part of the match
+                    overlap_IQ_total += float(overlap_IQ_val)
+                else:
+                    print("No numeric match found in the response.")
+                #overlap_IQ_val = re.search(r'\d+', overlap_IQ).group(0) #Get First Number in response
                 pairs += 1
         IQ_score = overlap_IQ_total/pairs/100 #Get Average overlap as a percentage
         
         # Calculate IQ + DQ score
         IQ_DQ_score = (IQ_score + DQ_score)/2
         
-        this_ref_scores = [IQ_score] + DQs_grounded + [DQ_score] + [IQ_DQ_score]
+        # Changed: Removed the [] outside of the score values 
+        this_ref_scores = [IQ_score] + [DQs_grounded] + [DQ_score] + [IQ_DQ_score]
         
         print("SCORES FOR : ",baselineResponse)
         print("[ IQ, \t DQ1, \t DQ2, \t DQ3, \t DQ, \t IQ+DQ ]")
         print(this_ref_scores)
         
         # Save scores to list of all reference scores 
-        all_scores.insert(this_ref_scores)
+        # Changed to append instead of insert
+        all_scores.append(this_ref_scores)
+        IQ1s.clear() #  
+  
 
-# runSAC3(quesSAC3Bank, 0, len(quesSAC3Bank), "gpt-3.5-turbo-0125")
-# runCoVe(quesCoVEBank, 0, len(quesCoVEBank), "gpt-3.5-turbo-0125")
-# runREF(quesREFBank, 0, len(quesREFBank), "gpt-3.5-turbo-0125")
+runSAC3(quesSAC3Bank, 0, len(quesSAC3Bank), "gpt-3.5-turbo-0125")
+runCoVe(quesCoVEBank, 0, len(quesCoVEBank), "gpt-3.5-turbo-0125")
+runREF(quesREFBank, 0, len(quesREFBank), "gpt-3.5-turbo-0125")
 
 # future tasks: implement risk score, implement two more methods (based on provided papers)
